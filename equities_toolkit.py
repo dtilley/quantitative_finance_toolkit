@@ -4,31 +4,9 @@ import cpi
 import yfinance as yf
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-import seaborn as sns
-from sklearn.model_selection import GridSearchCV, StratifiedShuffleSplit
+from sklearn.model_selection import GridSearchCV, ShuffleSplit
 from sklearn.neighbors import KernelDensity
-import matplotlib.pyplot as plt
-sns.set_theme()
-
-
-"""SCRATCH: working toward getting weekly stock prices for the last 5 years
-adjusted for inflation. Starting with MSFT"""
-
-today = datetime.date.today()
-date_100wks = today + relativedelta(weeks=-100)
-
-# Selected example stocks
-tickers = ['MSFT', 'ABBV', 'XOM', 'T', 'MMM']
-
-
-
-# Quick Plot
-plt.scatter(msft_hist.index, msft_hist.Close, marker='.')
-plt.xlabel('t (wk)')
-plt.ylabel('MSFT Stock Price ($)')
-plt.show()
-
-"""END SCRATCH"""
+from scipy.stats import percentileofscore
 
 
 # TODO: Create inflation estimation object
@@ -37,6 +15,40 @@ def get_cpi(date):
         return cpi.get(date)
     except cpi.errors.CPIObjectDoesNotExist:
         return np.nan
+
+
+def annualize_return(row, end_date: datetime, prices: dict) -> pd.Series:
+    """Annualizes the return from investor purchases
+
+    row: pandas dataframe row from investor purchase history
+    end_date: final date to compare value
+    prices: stock prices on end_date
+
+    returns: the annualize percentage change
+    """
+    n = 52/((end_date - row.Date).days // 7)
+    r_annual = {}
+    r_annual['Date'] = row.Date
+    for k, v in prices.items():
+        s, p = row[k]  # shares, price of purchase
+        r_annual[k] = ((1 + prices[k]/p) ** n) - 1
+    return(pd.Series(r_annual))
+
+
+def gain_loss(row, prices: dict) -> pd.Series:
+    """Calculates the gain/loss of the investor purchase history.
+
+    row: pandas dataframe row from investor purchase history
+    prices: stock prices on end_date
+
+    returns: the gain/loss of each purchase
+    """
+    gl = {}
+    gl['Date'] = row.Date
+    for k, v in prices.items():
+        s, p = row[k]  # shares, price of purchase
+        gl[k] = round(s*prices[k] - s*p, 2)  # value - purchase cost
+    return(pd.Series(gl))
 
 
 class Stock:
@@ -94,7 +106,7 @@ class Stock:
             grid = GridSearchCV(
                 KernelDensity(kernel='gaussian'),
                 params,
-                cv=StratifiedShuffleSplit(n_splits=5, test_size=0.20),
+                cv=ShuffleSplit(n_splits=5, test_size=0.20),
                 n_jobs=-1
                 )
             grid.fit(X)
@@ -107,6 +119,48 @@ class Stock:
             self.kde = grid
         else:
             print(f"{self.symbol} price_history is 'None'. Run {self.symbol}.download_history().")
+
+
+class Stocks_Composite:
+    """Collection of stocks for analysis. The stock price history are downloaded
+        a composite index created.
+    """
+    def __init__(self, tickers: list, **kwargs):
+        self.tickers = tickers
+        self.stocks = {i: Stock(i) for i in tickers}
+
+        # Download history
+        for v in self.stocks.values():
+            v.download_history(**kwargs)
+
+        # Calculate weights
+        weights = {k: v.ticker.info['marketCap'] for k, v in self.stocks.items()}
+        total_cap = sum(weights.values())
+        self.weights = {k: v/total_cap for k, v in weights.items()}
+
+        # Calculate index
+        ndx = pd.DataFrame()
+        ndx_adj = pd.DataFrame()
+        for k, v in self.stocks.items():
+            ndx[k] = v.price_history.Close * self.weights[k]
+            ndx_adj[k] = v.price_history.Inflation_Adj * self.weights[k]
+        ndx = ndx.apply(np.sum, axis=1)
+        ndx_adj = ndx_adj.apply(np.sum, axis=1)
+        self.index = pd.concat([self.stocks[tickers[0]].price_history.Date, ndx, ndx_adj], axis=1)
+        self.index.columns = ['Date', 'Index', 'Index_Adj']
+
+    def get_weights(self) -> dict:
+        return self.weights
+
+    def get_prices(self, date: datetime) -> dict:
+        prices = {}
+        for k, v in self.stocks.items():
+            prices[k] = v.price_history[v.price_history.Date == date].Close.iloc[0]
+        return prices
+
+    def get_price_histroy_index(self, date: datetime) -> int:
+        s = self.stocks[self.tickers[0]]
+        return(int(s.price_history[s.price_history.Date == date].index.values))
 
 
 class Investor:
@@ -123,6 +177,8 @@ class Investor:
         self.cashflow = cashflow
         self.current_pay_period = None
         self.next_pay_period = None
+        self.total_invested = None
+        self.purchases = []  # list of dicts of purchase history
 
         # Check cashflow frequency
         if freq in ('W', '2W', 'M'):
@@ -137,6 +193,7 @@ class Investor:
 
     def update_cashflow(self, date: datetime, back_pay=True):
         """Cashflow of the investor."""
+        date = pd.Timestamp(date)  # For period comparisons
         if self.current_pay_period is None:
             return  # pay does not exist / not setup
 
@@ -156,6 +213,12 @@ class Investor:
         else:
             print('Cashflow update unsuccessful. Check inputs.')
 
+    def calculate_total_invested(self):
+        """Calculates the total cost of investment."""
+        df = pd.DataFrame(self.purchases).dropna().drop(columns=['Date', 'Action'])
+        total = df.apply(lambda row: row.apply(lambda x: x[0] * x[1]))
+        self.total_invested = total.sum().sum()
+
 
 class Index_Fund(Investor):
     """The Index_Fund investor distributes stock purchases with the proportions
@@ -167,50 +230,126 @@ class Index_Fund(Investor):
         self.sc = sc
         self.weights = self.sc.get_weights()
         self.descriptor = 'Index'
-        self.purchases = []  # list of dicts
-        self.portfolio = {}.fromkeys(cmpst_ndx.tickers)  # tickers and number of shares
+        self.portfolio = {k: 0 for k in sc.tickers}  # initialize shares
 
     def invest(self, date: datetime, partial_shares=False):
         super().update_cashflow(date)  # Update avaliable cash
         prices = self.sc.get_prices(date)
-        if partial_shares:
-            
-        
+        purchase = {}
+        purchase['Date'] = date
+        total_cost = 0.0
+
+        for k in prices:
+            if partial_shares:
+                shares = (self.cash * self.weights[k]) / prices[k]
+            else:
+                shares = int((self.cash * self.weights[k]) / prices[k])
+            cost = shares * prices[k]
+            total_cost += cost
+            purchase[k] = (shares, round(prices[k], 2))  # (num_shares, P/S)
+
+        total_cost = round(total_cost, 2)  # avoids'Price Out' from rounding
+        # Check if the Investor is priced out
+        if self.cash >= total_cost and self.cash != 0:
+            self.cash -= total_cost
+            purchase['Action'] = 'Buy ' + self.descriptor
+            # Successful purchase: Update portfolio
+            self.portfolio = {k: v+purchase[k][0] for k, v in self.portfolio.items()}
+        else:
+            purchase['Action'] = 'Price Out'
+            # Reduce purchase dict
+            purchase = {k: v for k, v in purchase.items() if k in ('Date', 'Action')}
+        self.purchases.append(purchase)
 
 
-class Stocks_Composite:
-    """Collection of stocks for analysis. The stock price history are downloaded
-        a composite index created.
+class Adaptive_Price_Drop(Investor):
+    """The Adaptive_Price_Drop investor distributes stock purchases with the
+    proportions of the Stocks_Composite weights by default. If one of the stocks
+    in the Stocks_Composite experience a rare price drop (e.g. 5th percentile)
+    then the investment is proportioned with the weight of the percentile^-1.
+    The new weights priorize the stocks with the lowest price drop rather than
+    strickly the market cap weights.
     """
-    def __init__(self, tickers: list, **kwargs):
-        self.tickers = tickers
-        self.stocks = {i: Stock(i) for i in tickers}
+    def __init__(self, sc: Stocks_Composite, threshold: float = 5.0, **kwargs):
+        super().__init__(**kwargs)
+        self.sc = sc
+        self.lag = None  # prior period price changes considered descriptive
+        self.partial_shares = False  # whether to allow partial shares
+        self.threshold = threshold  # percentile threshold
+        self.default_weights = self.sc.get_weights()  # default weights
+        self.default_descriptor = 'Index'
+        self.portfolio = {k: 0 for k in sc.tickers}  # initialize shares
 
-        # Download history
-        for v in self.stocks.values():
-            v.download_history(**kwargs)
+    def set_lag(self, lag: int):
+        self.lag = lag
 
-        # Calculate weights
-        weights = {k: v.ticker.info['marketCap'] for k, v in self.stocks.items()}
-        total_cap = np.sum(weights.values())
-        self.weights = {k: v/total_cap for k, v in weights.items()}
+    def set_partial_shares(self, partial_shares: bool):
+        self.partial_shares = partial_shares
 
-        # Calcuate index
-        ndx = pd.DataFrame()
-        ndx_adj = pd.DataFrame()
-        for k, v in self.stocks.items():
-            ndx[k] = v.price_history.Close * self.weights[k]
-            ndx_adj[k] = v.price_history.Inflation_Adj * self.weights[k]
-        ndx = ndx.apply(np.sum, axis=1)
-        ndx_adj = ndx_adj.apply(np.sum, axis=1)
-        self.index = pd.concat([self.stocks[tickers[0]].price_history.Date, ndx, ndx_adj], axis=1)
-        self.index.columns = ['Date', 'Index', 'Index_Adj']
+    def get_price_change_percentile(self, ndx: int) -> dict:
+        percentile = {}
+        if self.lag is None or ndx-self.lag < 0:
+            for k, v in self.sc.stocks.items():
+                pct_change = v.price_history.Inflation_Adj[:(ndx+1)].pct_change()
+                last = pct_change.pop(ndx)
+                percentile[k] = percentileofscore(pct_change, last, nan_policy='omit')
+        else:
+            for k, v in self.sc.stocks.items:
+                lwrbnd = ndx - self.lag
+                pct_change = v.price_history.Inflation_Adj[lwrbnd:(ndx+1)].pct_change()
+                last = pct_change.pop(ndx)
+                percentile[k] = percentileofscore(pct_change, last, nan_policy='omit')
+        return(percentile)
 
-    def get_weights(self) -> dict:
-        return self.weights
+    def invest(self, date: datetime, weights: dict, descriptor: str):
+        super().update_cashflow(date)  # Update avaliable cash
+        purchase = {}
+        purchase['Date'] = date
+        prices = self.sc.get_prices(date)
+        total_cost = 0.0
 
-    def get_prices(self, date: datetime) -> dict:
-        prices = {}
-        for k, v in self.stocks.items():
-            prices[k] = v.price_history[v.price_history.Date == date].Close
-        return prices
+        for k in prices:
+            if self.partial_shares:
+                shares = (self.cash * weights[k]) / prices[k]
+            else:
+                shares = int((self.cash * weights[k]) / prices[k])
+            cost = shares * prices[k]
+            total_cost += cost
+            purchase[k] = (shares, round(prices[k], 2))  # (num_shares, P/S)
+
+        total_cost = round(total_cost, 2)  # avoids'Price Out' from rounding
+        # Check if the Investor is priced out
+        if self.cash >= total_cost and self.cash != 0:
+            self.cash -= total_cost
+            purchase['Action'] = 'Buy ' + descriptor
+            # Successful purchase: Update portfolio
+            self.portfolio = {k: v+purchase[k][0] for k, v in self.portfolio.items()}
+        else:
+            purchase['Action'] = 'Price Out'
+            # Reduce purchase dict
+            purchase = {k: v for k, v in purchase.items() if k in ('Date', 'Action')}
+        self.purchases.append(purchase)
+
+    def apd_invest(self, date: datetime):
+        ndx = self.sc.get_price_histroy_index(date)
+
+        # Check investment strategy
+        if ndx < 30:
+            # Not enough price history, default index weights
+            self.invest(date, self.default_weights, self.default_descriptor)
+        else:
+            ntiles = self.get_price_change_percentile(ndx)
+            if any(n <= self.threshold for n in ntiles.values()):
+                # threshold met re-weighting
+                n_weights = {}
+                for k, v in ntiles.items():
+                    try:
+                        n_weights[k] = v**-1
+                    except ZeroDivisionError:
+                        n_weights[k] = 0.1**-1  # a low default percentile
+                # Normalize weights
+                total_wght = sum(n_weights.values())
+                n_weights = {k: v/total_wght for k, v in n_weights.items()}
+                self.invest(date, n_weights, 'APD')
+            else:
+                self.invest(date, self.default_weights, self.default_descriptor)
