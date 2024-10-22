@@ -51,6 +51,21 @@ def gain_loss(row, prices: dict) -> pd.Series:
     return(pd.Series(gl))
 
 
+def weighted_avg_and_std(values, weights):
+    """
+    Return the weighted average and standard deviation.
+
+    They weights are in effect first normalized so that they
+    sum to 1 (and so they must not all be 0).
+
+    values, weights -- NumPy ndarrays with the same shape.
+    """
+    average = np.average(values, weights=weights)
+    # Fast and numerically precise:
+    variance = np.average((values-average)**2, weights=weights)
+    return (average, np.sqrt(variance))
+
+
 class Stock:
     """Stock object that cleans up price history for analysis. The underlying
     object is the yfinance ticker.
@@ -178,6 +193,7 @@ class Investor:
         self.current_pay_period = None
         self.next_pay_period = None
         self.total_invested = None
+        self.partial_shares = False  # whether to allow partial shares
         self.purchases = []  # list of dicts of purchase history
 
         # Check cashflow frequency
@@ -190,6 +206,9 @@ class Investor:
         """Sets the cashflow start date to sync with historical stock prices."""
         self.current_pay_period = pd.Period(start_date, freq=self.freq)
         self.next_pay_period = self.current_pay_period + 1
+
+    def set_partial_shares(self, partial_shares: bool):
+        self.partial_shares = partial_shares
 
     def update_cashflow(self, date: datetime, back_pay=True):
         """Cashflow of the investor."""
@@ -232,7 +251,7 @@ class Index_Fund(Investor):
         self.descriptor = 'Index'
         self.portfolio = {k: 0 for k in sc.tickers}  # initialize shares
 
-    def invest(self, date: datetime, partial_shares=False):
+    def invest(self, date: datetime):
         super().update_cashflow(date)  # Update avaliable cash
         prices = self.sc.get_prices(date)
         purchase = {}
@@ -240,7 +259,7 @@ class Index_Fund(Investor):
         total_cost = 0.0
 
         for k in prices:
-            if partial_shares:
+            if self.partial_shares:
                 shares = (self.cash * self.weights[k]) / prices[k]
             else:
                 shares = int((self.cash * self.weights[k]) / prices[k])
@@ -274,7 +293,6 @@ class Adaptive_Price_Drop(Investor):
         super().__init__(**kwargs)
         self.sc = sc
         self.lag = None  # prior period price changes considered descriptive
-        self.partial_shares = False  # whether to allow partial shares
         self.threshold = threshold  # percentile threshold
         self.default_weights = self.sc.get_weights()  # default weights
         self.default_descriptor = 'Index'
@@ -282,9 +300,6 @@ class Adaptive_Price_Drop(Investor):
 
     def set_lag(self, lag: int):
         self.lag = lag
-
-    def set_partial_shares(self, partial_shares: bool):
-        self.partial_shares = partial_shares
 
     def get_price_change_percentile(self, ndx: int) -> dict:
         percentile = {}
