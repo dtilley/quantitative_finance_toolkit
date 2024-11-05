@@ -9,11 +9,12 @@ adjusted for inflation."""
 
 end = datetime.today().date()
 start = end + relativedelta(weeks=-208)  # 4 years ago
-eg_date = sc.stocks['MSFT'].price_history.Date[104]  # 2 years ago date
+
 
 # Selected example stocks
 tickers = ['MSFT', 'ABBV', 'XOM', 'T', 'MMM']
 sc = Stocks_Composite(tickers, start=start, end=end)
+eg_date = sc.stocks['MSFT'].price_history.Date[104]  # 2 years ago date
 
 # Example index investor
 II = Index_Fund(sc, cash=1000.0, cashflow=300.0)

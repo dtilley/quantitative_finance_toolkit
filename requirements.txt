@@ -1,0 +1,9 @@
+cpi==1.1.8
+matplotlib==3.7.5
+numpy==1.24.4
+pandas==2.0.3
+python_dateutil==2.8.2
+scikit_learn==0.24.1
+scipy==1.14.1
+seaborn==0.11.1
+yfinance==0.2.40

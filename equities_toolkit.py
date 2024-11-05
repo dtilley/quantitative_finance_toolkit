@@ -9,13 +9,31 @@ from sklearn.neighbors import KernelDensity
 from scipy.stats import percentileofscore
 
 
-# TODO: Create inflation estimation object
-def get_cpi(date):
+# TODO: expand this to an object that tracks inflation
+def get_cpi(date: datetime, **kwargs) -> pd.Series:
+    """Retrieves the CPI for a datetime object.
+
+    Example useage with DataFrame:
+    dates['CPI'] = dates.Date.apply(get_cpi)
+    """
     try:
-        return cpi.get(date)
+        return cpi.get(date, **kwargs)
     except cpi.errors.CPIObjectDoesNotExist:
         return np.nan
 
+
+def calculate_monthly_inflation(cpi: pd.DataFrame) -> pd.Series:
+    """Converts a CPI series to an inflation rate. The cpi series has to be
+    datetime indexed (Ex: dates.set_index(pd.to_datetime(cpi.Date), inplace=True).
+    The U.S. Bureau of Labor Statistics releases pricing date on a monthly frequency.
+
+    returns: Datetime indexed monthly inflation rate.
+    """
+
+    #input_freq = pd.infer_freq(cpi.index)[0] # Eh, make this more robust
+    monthly_cpi = cpi.resample('M').last()
+    monthly_cpi['inflation_rate'] = monthly_cpi.CPI.pct_change()
+    
 
 def annualize_return(row, end_date: datetime, prices: dict) -> pd.Series:
     """Annualizes the return from investor purchases
@@ -55,8 +73,7 @@ def weighted_avg_and_std(values, weights):
     """
     Return the weighted average and standard deviation.
 
-    They weights are in effect first normalized so that they
-    sum to 1 (and so they must not all be 0).
+    The weights are first normalized so that they sum to 1 (so cannot be all0).
 
     values, weights -- NumPy ndarrays with the same shape.
     """
