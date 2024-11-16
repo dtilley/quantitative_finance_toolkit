@@ -89,6 +89,7 @@ for date in pd.date_range(start=start_date, end=end_date, freq='W'):
 # Output performance metrics
 investor.calculate_total_invested()
 print("Total Invested:", investor.total_invested)
+```
 
 ## How is works
 

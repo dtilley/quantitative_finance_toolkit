@@ -86,6 +86,8 @@ def weighted_avg_and_std(values, weights):
 class Stock:
     """Stock object that cleans up price history for analysis. The underlying
     object is the yfinance ticker.
+
+    Ex: msft = Stock('MSFT')
     """
     def __init__(self, ticker: str):
         self.ticker = yf.Ticker(ticker)
@@ -119,7 +121,7 @@ class Stock:
         self.t_res = interval
 
     def inflation_adjust(self, price, date):
-        """Adjust share prices to most recent CPI"""
+        """Adjust share prices to most recent CPI. Called by download_history()."""
         try:
             return cpi.inflate(price, date)
         except cpi.errors.CPIObjectDoesNotExist:
@@ -309,25 +311,25 @@ class Adaptive_Price_Drop(Investor):
     def __init__(self, sc: Stocks_Composite, threshold: float = 5.0, **kwargs):
         super().__init__(**kwargs)
         self.sc = sc
-        self.lag = None  # prior period price changes considered descriptive
+        self.window = None  # prior period price changes considered descriptive
         self.threshold = threshold  # percentile threshold
         self.default_weights = self.sc.get_weights()  # default weights
         self.default_descriptor = 'Index'
         self.portfolio = {k: 0 for k in sc.tickers}  # initialize shares
 
-    def set_lag(self, lag: int):
-        self.lag = lag
+    def set_window(self, window: int):
+        self.window = window
 
     def get_price_change_percentile(self, ndx: int) -> dict:
         percentile = {}
-        if self.lag is None or ndx-self.lag < 0:
+        if self.window is None or ndx-self.window < 0:
             for k, v in self.sc.stocks.items():
                 pct_change = v.price_history.Inflation_Adj[:(ndx+1)].pct_change()
                 last = pct_change.pop(ndx)
                 percentile[k] = percentileofscore(pct_change, last, nan_policy='omit')
         else:
             for k, v in self.sc.stocks.items:
-                lwrbnd = ndx - self.lag
+                lwrbnd = ndx - self.window
                 pct_change = v.price_history.Inflation_Adj[lwrbnd:(ndx+1)].pct_change()
                 last = pct_change.pop(ndx)
                 percentile[k] = percentileofscore(pct_change, last, nan_policy='omit')
